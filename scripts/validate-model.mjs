@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+await import('../web/engine.js?model-validation');
+const FW = globalThis.FW;
+
+const base = { ...FW.defaults };
+const first = FW.optimize(base);
+const repeated = FW.optimize(base);
+assert.ok(first.best, 'default farm context should have a feasible plan');
+assert.equal(first.count, first.list.length);
+assert.deepEqual(first.best.a, repeated.best.a, 'same inputs and seed must reproduce the chosen mix');
+assert.equal(first.best.mean, repeated.best.mean, 'same inputs and seed must reproduce expected net return');
+assert.ok(first.best.cost <= base.budget + 0.01, 'chosen plan must respect the cash constraint');
+assert.ok(first.best.water <= base.water + 0.01, 'chosen plan must respect the water constraint');
+assert.ok(first.list.every(p => p.feasible), 'optimizer candidates must satisfy both resource constraints');
+
+const fixedMix = first.best.a;
+const baseline = FW.evaluate(fixedMix, base);
+const dry = FW.evaluate(fixedMix, { ...base, rain: -20 });
+const priceStress = FW.evaluate(fixedMix, { ...base, price: -15 });
+const costStress = FW.evaluate(fixedMix, { ...base, costShock: 20 });
+const activeCrop = FW.crops.find((crop, i) => fixedMix[i] > 0);
+const activeEconomics = FW.cropEconomics(activeCrop, FW.crops.indexOf(activeCrop), base);
+const pricedMix = FW.evaluate(fixedMix, { ...base, cropEconomics: { [activeCrop.name]: { pricePerQ: activeEconomics.price * 1.2, costPerHa: activeEconomics.cost } } });
+const expensiveMix = FW.evaluate(fixedMix, { ...base, cropEconomics: { [activeCrop.name]: { pricePerQ: activeEconomics.price, costPerHa: activeEconomics.cost + 10000 } } });
+const recentEvidenceContext = { ...base, profileComplete: true, region: 'Pune district', soil: 'Medium black', economicsSource: 'Supplier quote', economicsDate: new Date().toISOString().slice(0, 10), fieldObservationCount: 2, weatherFetchedAt: new Date().toISOString() };
+const staleEvidenceContext = { ...recentEvidenceContext, economicsDate: new Date(Date.now() - 240 * 86400000).toISOString().slice(0, 10), weatherFetchedAt: new Date(Date.now() - 10 * 86400000).toISOString() };
+const recentEvidence = FW.evaluate(fixedMix, recentEvidenceContext);
+const staleEvidence = FW.evaluate(fixedMix, staleEvidenceContext);
+const futureQuoteContext = { ...recentEvidenceContext, economicsDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) };
+assert.ok(dry.mean < baseline.mean, 'dry-season stress should lower modeled mean return');
+assert.ok(priceStress.mean < baseline.mean, 'lower-price stress should lower modeled mean return');
+assert.ok(costStress.mean < baseline.mean, 'higher input costs should lower modeled mean return');
+assert.ok(Math.abs(costStress.cost - baseline.cost * 1.2) < 0.01, 'input cost shock should scale cultivation costs exactly');
+assert.ok(pricedMix.mean > baseline.mean, 'farmer-entered price should increase modeled return for a fixed crop mix');
+assert.ok(expensiveMix.cost > baseline.cost, 'farmer-entered cost should increase modeled costs');
+assert.equal(FW.evidenceAssessment(recentEvidenceContext).score, 100, 'evidence readiness should credit recent, explicitly entered context');
+assert.ok(FW.evidenceAssessment(staleEvidenceContext).score < FW.evidenceAssessment(recentEvidenceContext).score, 'stale price and forecast evidence should lower readiness');
+assert.ok(FW.evidenceAssessment(futureQuoteContext).score < FW.evidenceAssessment(recentEvidenceContext).score, 'future-dated quotes must not receive freshness credit');
+assert.ok(staleEvidence.p90 - staleEvidence.p10 > recentEvidence.p90 - recentEvidence.p10, 'stale evidence should widen the modeled outcome range');
+const userConstrained = FW.optimize({ ...base, budget: 50000, cropEconomics: { ...base.cropEconomics, Wheat: { pricePerQ: 2600, costPerHa: 70000 } } });
+assert.ok(userConstrained.list.every(p => p.cost <= 50000 + 0.01), 'user-entered cultivation costs must be included in hard budget feasibility');
+
+const noWater = FW.optimize({ ...base, water: 0 });
+assert.equal(noWater.count, 0, 'optimizer should report no feasible mix when no irrigation is available');
+assert.equal(noWater.best, null);
+const validation = FW.validationSuite(base);
+assert.equal(validation.total, 6, 'validation bench should report the full declared check set');
+assert.equal(validation.passed, validation.total, 'the default context should pass all synthetic software checks');
+assert.ok(validation.checks.every(check => check.pass), 'each visible validation claim must be backed by a passing model check');
+
+console.log(`Model validation passed: ${validation.passed}/${validation.total} synthetic software checks, plus existing constraint, responsiveness and evidence tests. This is not field validation.`);
